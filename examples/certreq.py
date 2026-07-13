@@ -15,7 +15,8 @@
 # TODO:
 #      [] Add a -encrypt flag to allow people to decide since if theres a ESC11 vuln endpoint; we would not want to use encryption(which is current default)
 #      [] Add the -sid flag to allow people to add/specify a sid to the cert request in case strong binding is being enforced by the CA
-#      [] Add additional options 
+#      [] Add additional options
+#      [] Add some additional useful functionality from Windows certdump. Potentially some of its more "enumeration" focused features such as dumping templates etc
 # Author:
 #   Abdul Mhanni
 
