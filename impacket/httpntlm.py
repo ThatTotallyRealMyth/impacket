@@ -9,15 +9,14 @@
 # for more information.
 #
 # Description:
-#   HTTP NTLM Authentication module
-# Supports plaintext passwords and NTLM hash pass-the-hash. Negotiate flags and NTLMv1/v2
-#   selection are handled by Impacket's getNTLMSSPType1/Type3 internally.
-#
-#   Implements the standard HTTP NTLM three-leg handshake transparently
-#   over keep-alive connections.
+#   HTTP NTLM Authentication module, mainly made for use with the certreq.py example script
 #
 # Author:
 #   Abdul Mhanni
+#
+# Reference for:
+#   HTTP NTLM Authentication, Pass-the-Hash over HTTP
+
 import base64
 import re
 
@@ -29,25 +28,21 @@ from impacket.ntlm import getNTLMSSPType1, getNTLMSSPType3
 
 class ImpacketHttpNtlmAuth(AuthBase):
     # requests.auth.AuthBase implementation using Impacket's NTLM library.
-    # Provides Impacket's full NTLM capability over HTTP, including
-    # pass-the-hash and NTLMv1/v2 selection.
-
+    
     def __init__(self, username, password='', hashes=None, use_ntlmv2=True):
-        # Parse the identity string into domain and username
-        # Accepts 'DOMAIN\\user', 'DOMAIN/user', 'user@domain', or plain 'user'
+
         self.domain, self.username = self._parseIdentity(username)
         self.password = password
         self.use_ntlmv2 = use_ntlmv2
 
-        # Parse NTLM hashes if provided
+   
         self.lmhash = b''
         self.nthash = b''
         if hashes is not None:
             self._parseHashes(hashes)
 
     def _parseIdentity(self, identity):
-        # Parse 'DOMAIN\\user' or 'user@domain' into (domain, username)
-        # Falls back to domain='.' if no separator is found
+  
         if '\\' in identity:
             domain, username = identity.split('\\', 1)
         elif '/' in identity:
@@ -60,7 +55,7 @@ class ImpacketHttpNtlmAuth(AuthBase):
         return domain, username
 
     def _parseHashes(self, hashes):
-        # Parse 'LMHASH:NTHASH' hex string into raw bytes
+
         try:
             lmhex, nthex = hashes.split(':')
         except ValueError:
@@ -72,22 +67,21 @@ class ImpacketHttpNtlmAuth(AuthBase):
         self.nthash = bytes.fromhex(nthex) if nthex else b''
 
     def _buildNegotiateMessage(self):
-       
+
         negotiate = getNTLMSSPType1(
             workstation='',
             domain=self.domain,
             signingRequired=False,
             use_ntlmv2=self.use_ntlmv2,
         )
-        return negotiate.getData()
+        return negotiate
 
     def _buildAuthenticateMessage(self, challengeBase64):
-        # Parse the server's Type 2 (Challenge) and build the
-        # Type 3 (Authenticate) response using getNTLMSSPType3
+
         challengeRaw = base64.b64decode(challengeBase64)
         negotiateMessage = self._buildNegotiateMessage()
 
-        authMsg = getNTLMSSPType3(
+        authMsg, exportedSessionKey = getNTLMSSPType3(
             type1=negotiateMessage,
             type2=challengeRaw,
             user=self.username,
@@ -100,8 +94,7 @@ class ImpacketHttpNtlmAuth(AuthBase):
         return authMsg.getData()
 
     def _extractChallengeFromHeader(self, response):
-        # Extract the base64 NTLM challenge token from the server
-        # WWW-Authenticate header after the Type 1 exchange
+
         authHeader = response.headers.get('WWW-Authenticate', '')
 
         match = re.search(r'(?:NTLM|Negotiate)\s+([a-zA-Z0-9+/]+={0,2})', authHeader)
@@ -120,8 +113,7 @@ class ImpacketHttpNtlmAuth(AuthBase):
         return request
 
     def _handleResponse(self, response, **kwargs):
-        # Drive the NTLM challenge-response handshake when the server
-        # returns 401 with WWW-Authenticate containing NTLM or Negotiate
+   
         if response.status_code != 401:
             return response
 
@@ -131,13 +123,14 @@ class ImpacketHttpNtlmAuth(AuthBase):
 
         LOG.debug('HTTP 401 received with NTLM challenge, starting authentication handshake')
 
-    
+ 
+        # Consume the original 401 body so the connection can be
         # reused (critical for keep-alive NTLM handshakes)
         response.content
         response.close()
 
         negotiateMsg = self._buildNegotiateMessage()
-        negotiateBase64 = base64.b64encode(negotiateMsg).decode('ascii')
+        negotiateBase64 = base64.b64encode(negotiateMsg.getData()).decode('ascii')
 
         requestType1 = response.request.copy()
         requestType1.headers['Authorization'] = 'NTLM %s' % negotiateBase64
@@ -145,7 +138,7 @@ class ImpacketHttpNtlmAuth(AuthBase):
         adapter = response.connection
         type2Response = adapter.send(requestType1, **kwargs)
 
-        # Step 2: Parse Type 2 (Challenge) and send Type 3 (Auth)
+     
         type2Response.content
         type2Response.close()
 
@@ -168,11 +161,11 @@ class ImpacketHttpNtlmAuth(AuthBase):
 
 
 def passwordAuth(identity, password, **kwargs):
-    # password-based HTTP NTLM auth
+    #  password-based HTTP NTLM auth
     return ImpacketHttpNtlmAuth(identity, password=password, **kwargs)
 
 
 def pthAuth(identity, ntHash, **kwargs):
-    #used for pass the hash over http
+    # pass-the-hash HTTP NTLM auth
     hashes = 'aad3b435b51404eeaad3b435b51404ee:%s' % ntHash
     return ImpacketHttpNtlmAuth(identity, hashes=hashes, **kwargs)
