@@ -15,7 +15,8 @@
 #   No test cases have been addded thus far in the development cycle but once that does occur; it can be found in tests/dcerpc/test_fasp.py
 #   Note that this protocol is exposed via a dyanmically assigned port so you will need to go through the EPM, as well as the fact that your DC may not expose the endpoint
 #   so you may need to play around with the settings a little bit. Documentation for this protocol and others like it can be found in impacket.wiki :3
-
+#   NOTE: This module does not really work in its current state. There are NDR/Marshalling related errors coming through. The only thing that I have faith in is that helper functions, the constants
+#   and maybe some of the more straight forward structures. Be warned that the road to fixing it is a bit tedious
 # Author: Abdul Mhanni
 
 from impacket import system_errors
