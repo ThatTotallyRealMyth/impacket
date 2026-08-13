@@ -1,9 +1,3 @@
-# /// script
-# requires-python = ">=3.13"
-# dependencies = [
-#     "impacket>=0.13.1",
-# ]
-# ///
 
 # Impacket - Collection of Python classes for working with network protocols.
 #
@@ -17,24 +11,14 @@
 #
 # Description:
 #   PKINIT (RFC 4556) support for Kerberos authentication. Provides
-#   certificate-based initial authentication using Diffie-Hellman key
-#   exchange and CMS/PKCS#7 signed data.
+#   certificate-based initial authentication.
 #
 #   The Diffie-Hellman exchange, the reply-key derivation and the overall
 #   message flow are derived from skelsec's minikerberos PKINIT
-#   implementation. Pretty much hes the reason why this even 
-#
-# References:
-#   RFC 4556 - Public Key Cryptography for Initial Authentication in
-#              Kerberos (PKINIT)
-#   RFC 4120 - The Kerberos Network Authentication Service (V5)
-#   RFC 3526 - MODP Diffie-Hellman groups for IKE (Group 14)
-#   RFC 5652 - Cryptographic Message Syntax (CMS)
-#   [MS-PKCA] - Windows PKINIT implementation specifics
+#   implementation. Pretty much hes the reason why this even was easy for me to implement
 #
 # Author:
 #   Abdul Mhanni
-#
 
 import datetime
 import hashlib
