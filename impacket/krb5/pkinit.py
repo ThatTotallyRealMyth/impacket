@@ -45,13 +45,6 @@ from cryptography.hazmat.primitives.asymmetric import padding, rsa, ec
 from cryptography.hazmat.primitives.serialization import pkcs12
 
 
-# Our random number generator
-try:
-    rand = random.SystemRandom()
-except NotImplementedError:
-    rand = random
-
-
 # PKINIT OIDs (RFC 4556 Section 3.2)
 id_pkinit_authData = '1.3.6.1.5.2.3.1'
 id_pkinit_DHKeyData = '1.3.6.1.5.2.3.2'
@@ -323,15 +316,13 @@ def signAuthPack(authPackDER, certificate, privateKey):
     signedAttrs[0] = contentTypeAttr
     signedAttrs[1] = messageDigestAttr
 
-    # For the signature the attributes are DER-encoded with a universal SET OF
-    # tag rather than the IMPLICIT [0] tag (RFC 5652 Section 5.4).
+    # For the signature the attributes are DER-encoded with a universal set of tag
     signedAttrsDER = b'\x31' + encoder.encode(signedAttrs)[1:]
 
     if isinstance(privateKey, rsa.RSAPrivateKey):
         signature = privateKey.sign(signedAttrsDER, padding.PKCS1v15(), hashes.SHA1())
 
-        # SignerInfo.signatureAlgorithm is
-        # rsaEncryption and digestAlgorithm separately carries SHA-1.
+        # SignerInfo.signatureAlgorithm is rsaEncryption and digestAlgorithm seperate
         signatureOID = id_rsaEncryption
 
     elif isinstance(privateKey, ec.EllipticCurvePrivateKey):
@@ -391,7 +382,7 @@ def signAuthPack(authPackDER, certificate, privateKey):
     signedData['certificates'][0] = certChoice
     signedData['signerInfos'][0] = signerInfo
 
-    # Wrap the SignedData in a CMS ContentInfo (RFC 4556 Section 3.2.1)
+    # Wrap the SignedData in a CMS ContentInfo (RFC 4556 Section 3.2.1) since thats needed i guess
     contentInfo = rfc5652.ContentInfo()
     contentInfo['contentType'] = id_signedData
     contentInfo['content'] = univ.Any(encoder.encode(signedData))
@@ -401,7 +392,6 @@ def signAuthPack(authPackDER, certificate, privateKey):
 
 def extractSignedContent(contentInfoDER):
     # Returns the (eContent, eContentType) carried by a CMS ContentInfo
-    # wrapping a SignedData.
     contentInfo = decoder.decode(contentInfoDER, asn1Spec=rfc5652.ContentInfo())[0]
 
     signedData = decoder.decode(contentInfo['content'], asn1Spec=rfc5652.SignedData())[0]
@@ -490,12 +480,12 @@ def _buildAuthPack(diffie, pkAuthNonce, reqBodyDER, now):
 
 
 ################################################################################
-# TGT acquisition
+# TGT request lik
 ################################################################################
 
 def getKerberosTGTPKINIT(clientName, certificate, privateKey, domain, kdcHost=None,
                          requestPAC=True, dhParams=None):
-    # Requests a TGT using PKINIT (certificate-based authentication).
+ 
     if isinstance(clientName, str):
         clientName = Principal(
             clientName,
@@ -545,7 +535,7 @@ def getKerberosTGTPKINIT(clientName, certificate, privateKey, domain, kdcHost=No
 
     pkAuthNonce = rand.getrandbits(31)
 
-    # checksum must be over DER(KDC-REQ-BODY), without the outer [4] EXPLICIT
+    # checksum must be over DER, KDC-REQ-BODY, without the outer [4] EXPLICIT
     # tag used by the surrounding AS-REQ req-body field.
     reqBodyDER = encodeKDCReqBodyForPKINITChecksum(reqBody)
 
@@ -589,7 +579,7 @@ def getKerberosTGTPKINIT(clientName, certificate, privateKey, domain, kdcHost=No
 
 
 def _processPKINITASRep(tgt, asRep, diffie, expectedNonce):
-    # Decrypts a PKINIT AS-REP and returns the same 4-tuple as getKerberosTGT
+ 
     paPkAsRepDER = None
 
     for padata in asRep['padata']:
