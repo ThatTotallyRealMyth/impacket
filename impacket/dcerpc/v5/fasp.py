@@ -9,20 +9,37 @@
 # for more information.
 #
 # Description:
-#   [MS-FASP] Firewall and Advanced Security Protocol Interface implementation
+#   [MS-FASP] Firewall and Advanced Security Protocol implementation.
 #
-#   Helper functions start with "h"<name of the call>.
-#   No test cases have been addded thus far in the development cycle but once that does occur; it can be found in tests/dcerpc/test_fasp.py
-#   Note that this protocol is exposed via a dyanmically assigned port so you will need to go through the EPM, as well as the fact that your DC may not expose the endpoint
-#   so you may need to play around with the settings a little bit. Documentation for this protocol and others like it can be found in impacket.wiki :3
-#   NOTE: This module does not really work in its current state. There are NDR/Marshalling related errors coming through. The only thing that I have faith in is that helper functions, the constants
-#   and maybe some of the more straight forward structures. Be warned that the road to fixing it is a bit tedious
+#   The interface uses a dynamically assigned TCP endpoint. Resolve it through
+#   the endpoint mapper and use packet privacy with GSS Negotiate, as required
+#   by section 2.1 of the protocol specification.
+#
 # Author: Abdul Mhanni
 
 from impacket import system_errors
-from impacket.dcerpc.v5.dtypes import BOOL, BOOLEAN, BYTE, DWORD, FILETIME, GUID, LONG64, LPDWORD, LPSTR, LPWSTR, NULL, PBOOL, PGUID, PULONG, PUSHORT, ULONG, ULONGLONG, USHORT, UUID, WCHAR, WORD
+from impacket.dcerpc.v5.dtypes import (
+    BYTE,
+    DWORD,
+    GUID,
+    LPDWORD,
+    LPSTR,
+    LPWSTR,
+    ULONG,
+    ULONGLONG,
+    UUID,
+    WORD,
+)
 from impacket.dcerpc.v5.enum import Enum
-from impacket.dcerpc.v5.ndr import NDRCALL, NDRENUM, NDRPOINTER, NDRSTRUCT, NDRUNION, NDRUniConformantArray
+from impacket.dcerpc.v5.ndr import (
+    NDRCALL,
+    NDRENUM,
+    NDRPOINTER,
+    NDRSTRUCT,
+    NDRUNION,
+    NDRUniConformantArray,
+    NDRUniConformantVaryingArray,
+)
 from impacket.dcerpc.v5.rpcrt import DCERPCException
 from impacket.uuid import uuidtup_to_bin
 
@@ -32,12 +49,14 @@ class DCERPCSessionError(DCERPCException):
     def __init__(self, error_string=None, error_code=None, packet=None):
         DCERPCException.__init__(self, error_string, error_code, packet)
 
-    def __str__( self ):
+    def __str__(self):
         key = self.error_code
         if key in system_errors.ERROR_MESSAGES:
             error_msg_short = system_errors.ERROR_MESSAGES[key][0]
             error_msg_verbose = system_errors.ERROR_MESSAGES[key][1]
-            return 'FASP SessionError: code: 0x%x - %s - %s' % (self.error_code, error_msg_short, error_msg_verbose)
+            return 'FASP SessionError: code: 0x%x - %s - %s' % (
+                self.error_code, error_msg_short, error_msg_verbose
+            )
         else:
             return 'FASP SessionError: unknown error code: 0x%x' % self.error_code
 
@@ -65,6 +84,16 @@ FW_HYPERV_RULE1_SCHEMA_VERSION = 0x0221
 # ENUMERATIONS
 ################################################################################
 
+class _NDRENUM32(NDRENUM):
+    """NDR representation for IDL enums carrying the [v1_enum] attribute."""
+
+    align = 4
+    align64 = 4
+    structure = (
+        ('Data', '<L'),
+    )
+    structure64 = structure
+
 class FW_STORE_TYPE(NDRENUM):
     class enumItems(Enum):
         FW_STORE_TYPE_INVALID                                                        = 0
@@ -88,7 +117,7 @@ class FW_TRANSACTIONAL_STATE(NDRENUM):
         FW_TRANSACTIONAL_STATE_NO_FLUSH                                              = 1
         FW_TRANSACTIONAL_STATE_MAX                                                   = 2
 
-class FW_PROFILE_TYPE(NDRENUM):
+class FW_PROFILE_TYPE(_NDRENUM32):
     class enumItems(Enum):
         FW_PROFILE_TYPE_INVALID                                                      = 0
         FW_PROFILE_TYPE_DOMAIN                                                       = 1
@@ -215,7 +244,7 @@ class FW_TRUST_TUPLE_KEYWORD(NDRENUM):
         FW_TRUST_TUPLE_KEYWORD_MAX_V2_26                                             = 32
         FW_TRUST_TUPLE_KEYWORD_MAX_V2_27                                             = 128
 
-class FW_RULE_STATUS(NDRENUM):
+class FW_RULE_STATUS(_NDRENUM32):
     class enumItems(Enum):
         FW_RULE_STATUS_OK                                                            = 65536
         FW_RULE_STATUS_PARTIALLY_IGNORED                                             = 131072
@@ -641,7 +670,7 @@ class FW_CONFIG_FLAGS(NDRENUM):
     class enumItems(Enum):
         FW_CONFIG_FLAG_RETURN_DEFAULT_IF_NOT_FOUND                                   = 1
 
-class FW_RULE_CATEGORY(NDRENUM):
+class FW_RULE_CATEGORY(_NDRENUM32):
     class enumItems(Enum):
         FW_RULE_CATEGORY_BOOT                                                        = 0
         FW_RULE_CATEGORY_STEALTH                                                     = 1
@@ -991,12 +1020,52 @@ class PVOID(NDRPOINTER):
         ('Data', BYTE),
     )
 
+class _FW_LINKED_LIST_POINTER(NDRPOINTER):
+    """A recursive pointer whose embedded form defaults to NULL.
+
+    NDRPOINTER eagerly constructs its referent. That behavior cannot represent a
+    self-referential IDL list because constructing one node would construct the
+    next node forever. Top-level pointers retain the regular eager behavior,
+    while embedded next pointers allocate their referent only when decoding a
+    non-NULL pointer from the wire.
+    """
+
+    def __init__(self, data=None, isNDR64=False, topLevel=False):
+        if topLevel:
+            NDRPOINTER.__init__(self, data, isNDR64, topLevel)
+            return
+
+        referent = self.referent
+        self.referent = ()
+        NDRPOINTER.__init__(self, None, isNDR64, topLevel)
+        self.referent = referent
+        self.fields['Data'] = b''
+
+        if data is None:
+            self.fields['ReferentID'] = 0
+        else:
+            self.fromString(data)
+
+    def fromString(self, data, offset=0):
+        size = NDRPOINTER.fromString(self, data, offset)
+        if self.fields['ReferentID'] != 0 and self.fields['Data'] == b'':
+            self.fields['Data'] = self.referent[0][1](isNDR64=self._isNDR64)
+        return size
+
 class BYTE_ARRAY(NDRUniConformantArray):
     item = 'c'
 
 class PBYTE_ARRAY(NDRPOINTER):
     referent = (
         ('Data', BYTE_ARRAY),
+    )
+
+class BYTE_ARRAY_CV(NDRUniConformantVaryingArray):
+    item = 'c'
+
+class PBYTE_ARRAY_CV(NDRPOINTER):
+    referent = (
+        ('Data', BYTE_ARRAY_CV),
     )
 
 class DWORD_ARRAY(NDRUniConformantArray):
@@ -1292,9 +1361,12 @@ class FW_PORT_OR_ICMP_UNION(NDRUNION):
         else:
             return NDRUNION.__setitem__(self, key, value)
 
+class PFW_RULE2_0(_FW_LINKED_LIST_POINTER):
+    pass
+
 class FW_RULE2_0(NDRSTRUCT):
     structure = (
-        ('pNext', PVOID),
+        ('pNext', PFW_RULE2_0),
         ('wSchemaVersion', WORD),
         ('wszRuleId', LPWSTR),
         ('wszName', LPWSTR),
@@ -1321,22 +1393,21 @@ class FW_RULE2_0(NDRSTRUCT):
         ('Reserved', DWORD),
     )
 
-class PFW_RULE2_0(NDRPOINTER):
+PFW_RULE2_0.referent = (
+    ('Data', FW_RULE2_0),
+)
+
+class PPFW_RULE2_0(NDRPOINTER):
     referent = (
-        ('Data', FW_RULE2_0),
+        ('Data', PFW_RULE2_0),
     )
 
-class FW_RULE2_0_ARRAY(NDRUniConformantArray):
-    item = FW_RULE2_0
-
-class PFW_RULE2_0_ARRAY(NDRPOINTER):
-    referent = (
-        ('Data', FW_RULE2_0_ARRAY),
-    )
+class PFW_RULE2_10(_FW_LINKED_LIST_POINTER):
+    pass
 
 class FW_RULE2_10(NDRSTRUCT):
     structure = (
-        ('pNext', PVOID),
+        ('pNext', PFW_RULE2_10),
         ('wSchemaVersion', WORD),
         ('wszRuleId', LPWSTR),
         ('wszName', LPWSTR),
@@ -1364,22 +1435,21 @@ class FW_RULE2_10(NDRSTRUCT):
         ('pMetaData', PFW_OBJECT_METADATA),
     )
 
-class PFW_RULE2_10(NDRPOINTER):
+PFW_RULE2_10.referent = (
+    ('Data', FW_RULE2_10),
+)
+
+class PPFW_RULE2_10(NDRPOINTER):
     referent = (
-        ('Data', FW_RULE2_10),
+        ('Data', PFW_RULE2_10),
     )
 
-class FW_RULE2_10_ARRAY(NDRUniConformantArray):
-    item = FW_RULE2_10
-
-class PFW_RULE2_10_ARRAY(NDRPOINTER):
-    referent = (
-        ('Data', FW_RULE2_10_ARRAY),
-    )
+class PFW_RULE2_20(_FW_LINKED_LIST_POINTER):
+    pass
 
 class FW_RULE2_20(NDRSTRUCT):
     structure = (
-        ('pNext', PVOID),
+        ('pNext', PFW_RULE2_20),
         ('wSchemaVersion', WORD),
         ('wszRuleId', LPWSTR),
         ('wszName', LPWSTR),
@@ -1411,22 +1481,21 @@ class FW_RULE2_20(NDRSTRUCT):
         ('dwTrustTupleKeywords', DWORD),
     )
 
-class PFW_RULE2_20(NDRPOINTER):
+PFW_RULE2_20.referent = (
+    ('Data', FW_RULE2_20),
+)
+
+class PPFW_RULE2_20(NDRPOINTER):
     referent = (
-        ('Data', FW_RULE2_20),
+        ('Data', PFW_RULE2_20),
     )
 
-class FW_RULE2_20_ARRAY(NDRUniConformantArray):
-    item = FW_RULE2_20
-
-class PFW_RULE2_20_ARRAY(NDRPOINTER):
-    referent = (
-        ('Data', FW_RULE2_20_ARRAY),
-    )
+class PFW_RULE2_24(_FW_LINKED_LIST_POINTER):
+    pass
 
 class FW_RULE2_24(NDRSTRUCT):
     structure = (
-        ('pNext', PVOID),
+        ('pNext', PFW_RULE2_24),
         ('wSchemaVersion', WORD),
         ('wszRuleId', LPWSTR),
         ('wszName', LPWSTR),
@@ -1460,22 +1529,21 @@ class FW_RULE2_24(NDRSTRUCT):
         ('wszSecurityRealmId', LPWSTR),
     )
 
-class PFW_RULE2_24(NDRPOINTER):
+PFW_RULE2_24.referent = (
+    ('Data', FW_RULE2_24),
+)
+
+class PPFW_RULE2_24(NDRPOINTER):
     referent = (
-        ('Data', FW_RULE2_24),
+        ('Data', PFW_RULE2_24),
     )
 
-class FW_RULE2_24_ARRAY(NDRUniConformantArray):
-    item = FW_RULE2_24
-
-class PFW_RULE2_24_ARRAY(NDRPOINTER):
-    referent = (
-        ('Data', FW_RULE2_24_ARRAY),
-    )
+class PFW_RULE2_25(_FW_LINKED_LIST_POINTER):
+    pass
 
 class FW_RULE2_25(NDRSTRUCT):
     structure = (
-        ('pNext', PVOID),
+        ('pNext', PFW_RULE2_25),
         ('wSchemaVersion', WORD),
         ('wszRuleId', LPWSTR),
         ('wszName', LPWSTR),
@@ -1510,22 +1578,21 @@ class FW_RULE2_25(NDRSTRUCT):
         ('wFlags2', WORD),
     )
 
-class PFW_RULE2_25(NDRPOINTER):
+PFW_RULE2_25.referent = (
+    ('Data', FW_RULE2_25),
+)
+
+class PPFW_RULE2_25(NDRPOINTER):
     referent = (
-        ('Data', FW_RULE2_25),
+        ('Data', PFW_RULE2_25),
     )
 
-class FW_RULE2_25_ARRAY(NDRUniConformantArray):
-    item = FW_RULE2_25
-
-class PFW_RULE2_25_ARRAY(NDRPOINTER):
-    referent = (
-        ('Data', FW_RULE2_25_ARRAY),
-    )
+class PFW_RULE2_26(_FW_LINKED_LIST_POINTER):
+    pass
 
 class FW_RULE2_26(NDRSTRUCT):
     structure = (
-        ('pNext', PVOID),
+        ('pNext', PFW_RULE2_26),
         ('wSchemaVersion', WORD),
         ('wszRuleId', LPWSTR),
         ('wszName', LPWSTR),
@@ -1561,22 +1628,21 @@ class FW_RULE2_26(NDRSTRUCT):
         ('RemoteOutServerNames', FW_NETWORK_NAMES),
     )
 
-class PFW_RULE2_26(NDRPOINTER):
+PFW_RULE2_26.referent = (
+    ('Data', FW_RULE2_26),
+)
+
+class PPFW_RULE2_26(NDRPOINTER):
     referent = (
-        ('Data', FW_RULE2_26),
+        ('Data', PFW_RULE2_26),
     )
 
-class FW_RULE2_26_ARRAY(NDRUniConformantArray):
-    item = FW_RULE2_26
-
-class PFW_RULE2_26_ARRAY(NDRPOINTER):
-    referent = (
-        ('Data', FW_RULE2_26_ARRAY),
-    )
+class PFW_RULE2_27(_FW_LINKED_LIST_POINTER):
+    pass
 
 class FW_RULE2_27(NDRSTRUCT):
     structure = (
-        ('pNext', PVOID),
+        ('pNext', PFW_RULE2_27),
         ('wSchemaVersion', WORD),
         ('wszRuleId', LPWSTR),
         ('wszName', LPWSTR),
@@ -1614,22 +1680,21 @@ class FW_RULE2_27(NDRSTRUCT):
         ('compartmentId', DWORD),
     )
 
-class PFW_RULE2_27(NDRPOINTER):
+PFW_RULE2_27.referent = (
+    ('Data', FW_RULE2_27),
+)
+
+class PPFW_RULE2_27(NDRPOINTER):
     referent = (
-        ('Data', FW_RULE2_27),
+        ('Data', PFW_RULE2_27),
     )
 
-class FW_RULE2_27_ARRAY(NDRUniConformantArray):
-    item = FW_RULE2_27
-
-class PFW_RULE2_27_ARRAY(NDRPOINTER):
-    referent = (
-        ('Data', FW_RULE2_27_ARRAY),
-    )
+class PFW_RULE2_31(_FW_LINKED_LIST_POINTER):
+    pass
 
 class FW_RULE2_31(NDRSTRUCT):
     structure = (
-        ('pNext', PVOID),
+        ('pNext', PFW_RULE2_31),
         ('wSchemaVersion', WORD),
         ('wszRuleId', LPWSTR),
         ('wszName', LPWSTR),
@@ -1669,22 +1734,21 @@ class FW_RULE2_31(NDRSTRUCT):
         ('RemoteDynamicKeywordAddresses', FW_DYNAMIC_KEYWORD_ADDRESS_ID_LIST),
     )
 
-class PFW_RULE2_31(NDRPOINTER):
+PFW_RULE2_31.referent = (
+    ('Data', FW_RULE2_31),
+)
+
+class PPFW_RULE2_31(NDRPOINTER):
     referent = (
-        ('Data', FW_RULE2_31),
+        ('Data', PFW_RULE2_31),
     )
 
-class FW_RULE2_31_ARRAY(NDRUniConformantArray):
-    item = FW_RULE2_31
-
-class PFW_RULE2_31_ARRAY(NDRPOINTER):
-    referent = (
-        ('Data', FW_RULE2_31_ARRAY),
-    )
+class PFW_RULE(_FW_LINKED_LIST_POINTER):
+    pass
 
 class FW_RULE(NDRSTRUCT):
     structure = (
-        ('pNext', PVOID),
+        ('pNext', PFW_RULE),
         ('wSchemaVersion', WORD),
         ('wszRuleId', LPWSTR),
         ('wszName', LPWSTR),
@@ -1725,17 +1789,13 @@ class FW_RULE(NDRSTRUCT):
         ('wszPackageFamilyName', LPWSTR),
     )
 
-class PFW_RULE(NDRPOINTER):
-    referent = (
-        ('Data', FW_RULE),
-    )
+PFW_RULE.referent = (
+    ('Data', FW_RULE),
+)
 
-class FW_RULE_ARRAY(NDRUniConformantArray):
-    item = FW_RULE
-
-class PFW_RULE_ARRAY(NDRPOINTER):
+class PPFW_RULE(NDRPOINTER):
     referent = (
-        ('Data', FW_RULE_ARRAY),
+        ('Data', PFW_RULE),
     )
 
 class FW_NETWORK(NDRSTRUCT):
@@ -1744,8 +1804,13 @@ class FW_NETWORK(NDRSTRUCT):
         ('ProfileType', FW_PROFILE_TYPE),
     )
 
+class PFW_NETWORK(NDRPOINTER):
+    referent = (
+        ('Data', FW_NETWORK),
+    )
+
 class FW_NETWORK_ARRAY(NDRUniConformantArray):
-    item = FW_NETWORK
+    item = PFW_NETWORK
 
 class PFW_NETWORK_ARRAY(NDRPOINTER):
     referent = (
@@ -1758,8 +1823,13 @@ class FW_ADAPTER(NDRSTRUCT):
         ('Guid', GUID),
     )
 
+class PFW_ADAPTER(NDRPOINTER):
+    referent = (
+        ('Data', FW_ADAPTER),
+    )
+
 class FW_ADAPTER_ARRAY(NDRUniConformantArray):
-    item = FW_ADAPTER
+    item = PFW_ADAPTER
 
 class PFW_ADAPTER_ARRAY(NDRPOINTER):
     referent = (
@@ -1788,17 +1858,25 @@ class FW_PRODUCT(NDRSTRUCT):
         ('pszPathToSignedProductExe', LPWSTR),
     )
 
+class PFW_PRODUCT(NDRPOINTER):
+    referent = (
+        ('Data', FW_PRODUCT),
+    )
+
 class FW_PRODUCT_ARRAY(NDRUniConformantArray):
-    item = FW_PRODUCT
+    item = PFW_PRODUCT
 
 class PFW_PRODUCT_ARRAY(NDRPOINTER):
     referent = (
         ('Data', FW_PRODUCT_ARRAY),
     )
 
+class PFW_CS_RULE2_0(_FW_LINKED_LIST_POINTER):
+    pass
+
 class FW_CS_RULE2_0(NDRSTRUCT):
     structure = (
-        ('pNext', PVOID),
+        ('pNext', PFW_CS_RULE2_0),
         ('wSchemaVersion', WORD),
         ('wszRuleId', LPWSTR),
         ('wszName', LPWSTR),
@@ -1827,22 +1905,21 @@ class FW_CS_RULE2_0(NDRSTRUCT):
         ('Status', FW_RULE_STATUS),
     )
 
-class PFW_CS_RULE2_0(NDRPOINTER):
+PFW_CS_RULE2_0.referent = (
+    ('Data', FW_CS_RULE2_0),
+)
+
+class PPFW_CS_RULE2_0(NDRPOINTER):
     referent = (
-        ('Data', FW_CS_RULE2_0),
+        ('Data', PFW_CS_RULE2_0),
     )
 
-class FW_CS_RULE2_0_ARRAY(NDRUniConformantArray):
-    item = FW_CS_RULE2_0
-
-class PFW_CS_RULE2_0_ARRAY(NDRPOINTER):
-    referent = (
-        ('Data', FW_CS_RULE2_0_ARRAY),
-    )
+class PFW_CS_RULE2_10(_FW_LINKED_LIST_POINTER):
+    pass
 
 class FW_CS_RULE2_10(NDRSTRUCT):
     structure = (
-        ('pNext', PVOID),
+        ('pNext', PFW_CS_RULE2_10),
         ('wSchemaVersion', WORD),
         ('wszRuleId', LPWSTR),
         ('wszName', LPWSTR),
@@ -1874,22 +1951,21 @@ class FW_CS_RULE2_10(NDRSTRUCT):
         ('pMetaData', PFW_OBJECT_METADATA),
     )
 
-class PFW_CS_RULE2_10(NDRPOINTER):
+PFW_CS_RULE2_10.referent = (
+    ('Data', FW_CS_RULE2_10),
+)
+
+class PPFW_CS_RULE2_10(NDRPOINTER):
     referent = (
-        ('Data', FW_CS_RULE2_10),
+        ('Data', PFW_CS_RULE2_10),
     )
 
-class FW_CS_RULE2_10_ARRAY(NDRUniConformantArray):
-    item = FW_CS_RULE2_10
-
-class PFW_CS_RULE2_10_ARRAY(NDRPOINTER):
-    referent = (
-        ('Data', FW_CS_RULE2_10_ARRAY),
-    )
+class PFW_CS_RULE(_FW_LINKED_LIST_POINTER):
+    pass
 
 class FW_CS_RULE(NDRSTRUCT):
     structure = (
-        ('pNext', PVOID),
+        ('pNext', PFW_CS_RULE),
         ('wSchemaVersion', WORD),
         ('wszRuleId', LPWSTR),
         ('wszName', LPWSTR),
@@ -1927,17 +2003,13 @@ class FW_CS_RULE(NDRSTRUCT):
         ('wszTransportUserAuthzSDDL', LPWSTR),
     )
 
-class PFW_CS_RULE(NDRPOINTER):
-    referent = (
-        ('Data', FW_CS_RULE),
-    )
+PFW_CS_RULE.referent = (
+    ('Data', FW_CS_RULE),
+)
 
-class FW_CS_RULE_ARRAY(NDRUniConformantArray):
-    item = FW_CS_RULE
-
-class PFW_CS_RULE_ARRAY(NDRPOINTER):
+class PPFW_CS_RULE(NDRPOINTER):
     referent = (
-        ('Data', FW_CS_RULE_ARRAY),
+        ('Data', PFW_CS_RULE),
     )
 
 class FW_AUTH_SUITE2_10_CERT(NDRSTRUCT):
@@ -1951,9 +2023,6 @@ class FW_AUTH_SUITE2_10_SHKEY(NDRSTRUCT):
     )
 
 class FW_AUTH_SUITE2_10_UNION(NDRUNION):
-    commonHdr = (
-        ('tag', DWORD),
-    )
     union = {
         3 : ('SharedKey', FW_AUTH_SUITE2_10_SHKEY),
         5 : ('Cert', FW_AUTH_SUITE2_10_CERT),
@@ -2001,9 +2070,6 @@ class FW_AUTH_SUITE_PROXY(NDRSTRUCT):
     )
 
 class FW_AUTH_SUITE_UNION(NDRUNION):
-    commonHdr = (
-        ('tag', DWORD),
-    )
     union = {
         2 : ('ProxyServer', FW_AUTH_SUITE_PROXY),
         3 : ('SharedKey', FW_AUTH_SUITE_SHKEY),
@@ -2027,9 +2093,12 @@ class PFW_AUTH_SUITE2_10_ARRAY(NDRPOINTER):
         ('Data', FW_AUTH_SUITE2_10_ARRAY),
     )
 
+class PFW_AUTH_SET2_10(_FW_LINKED_LIST_POINTER):
+    pass
+
 class FW_AUTH_SET2_10(NDRSTRUCT):
     structure = (
-        ('pNext', PVOID),
+        ('pNext', PFW_AUTH_SET2_10),
         ('wSchemaVersion', WORD),
         ('IpSecPhase', FW_IPSEC_PHASE),
         ('wszSetId', LPWSTR),
@@ -2044,17 +2113,13 @@ class FW_AUTH_SET2_10(NDRSTRUCT):
         ('dwAuthSetFlags', DWORD),
     )
 
-class PFW_AUTH_SET2_10(NDRPOINTER):
-    referent = (
-        ('Data', FW_AUTH_SET2_10),
-    )
+PFW_AUTH_SET2_10.referent = (
+    ('Data', FW_AUTH_SET2_10),
+)
 
-class FW_AUTH_SET2_10_ARRAY(NDRUniConformantArray):
-    item = FW_AUTH_SET2_10
-
-class PFW_AUTH_SET2_10_ARRAY(NDRPOINTER):
+class PPFW_AUTH_SET2_10(NDRPOINTER):
     referent = (
-        ('Data', FW_AUTH_SET2_10_ARRAY),
+        ('Data', PFW_AUTH_SET2_10),
     )
 
 class FW_AUTH_SUITE_ARRAY(NDRUniConformantArray):
@@ -2065,9 +2130,12 @@ class PFW_AUTH_SUITE_ARRAY(NDRPOINTER):
         ('Data', FW_AUTH_SUITE_ARRAY),
     )
 
+class PFW_AUTH_SET(_FW_LINKED_LIST_POINTER):
+    pass
+
 class FW_AUTH_SET(NDRSTRUCT):
     structure = (
-        ('pNext', PVOID),
+        ('pNext', PFW_AUTH_SET),
         ('wSchemaVersion', WORD),
         ('IpSecPhase', FW_IPSEC_PHASE),
         ('wszSetId', LPWSTR),
@@ -2082,17 +2150,13 @@ class FW_AUTH_SET(NDRSTRUCT):
         ('dwAuthSetFlags', DWORD),
     )
 
-class PFW_AUTH_SET(NDRPOINTER):
-    referent = (
-        ('Data', FW_AUTH_SET),
-    )
+PFW_AUTH_SET.referent = (
+    ('Data', FW_AUTH_SET),
+)
 
-class FW_AUTH_SET_ARRAY(NDRUniConformantArray):
-    item = FW_AUTH_SET
-
-class PFW_AUTH_SET_ARRAY(NDRPOINTER):
+class PPFW_AUTH_SET(NDRPOINTER):
     referent = (
-        ('Data', FW_AUTH_SET_ARRAY),
+        ('Data', PFW_AUTH_SET),
     )
 
 class FW_PHASE1_CRYPTO_SUITE(NDRSTRUCT):
@@ -2147,17 +2211,17 @@ class FW_CRYPTO_SET_PHASE2(NDRSTRUCT):
     )
 
 class FW_CRYPTO_SET_UNION(NDRUNION):
-    commonHdr = (
-        ('tag', DWORD),
-    )
     union = {
         1 : ('Phase1', FW_CRYPTO_SET_PHASE1),
         2 : ('Phase2', FW_CRYPTO_SET_PHASE2),
     }
 
+class PFW_CRYPTO_SET(_FW_LINKED_LIST_POINTER):
+    pass
+
 class FW_CRYPTO_SET(NDRSTRUCT):
     structure = (
-        ('pNext', PVOID),
+        ('pNext', PFW_CRYPTO_SET),
         ('wSchemaVersion', WORD),
         ('IpSecPhase', FW_IPSEC_PHASE),
         ('wszSetId', LPWSTR),
@@ -2171,17 +2235,13 @@ class FW_CRYPTO_SET(NDRSTRUCT):
         ('dwCryptoSetFlags', DWORD),
     )
 
-class PFW_CRYPTO_SET(NDRPOINTER):
-    referent = (
-        ('Data', FW_CRYPTO_SET),
-    )
+PFW_CRYPTO_SET.referent = (
+    ('Data', FW_CRYPTO_SET),
+)
 
-class FW_CRYPTO_SET_ARRAY(NDRUniConformantArray):
-    item = FW_CRYPTO_SET
-
-class PFW_CRYPTO_SET_ARRAY(NDRPOINTER):
+class PPFW_CRYPTO_SET(NDRPOINTER):
     referent = (
-        ('Data', FW_CRYPTO_SET_ARRAY),
+        ('Data', PFW_CRYPTO_SET),
     )
 
 class FW_BYTE_BLOB(NDRSTRUCT):
@@ -2215,9 +2275,6 @@ class FW_AUTH_INFO_KERB(NDRSTRUCT):
     )
 
 class FW_AUTH_INFO_UNION(NDRUNION):
-    commonHdr = (
-        ('tag', DWORD),
-    )
     union = {
         2  : ('Kerberos', FW_AUTH_INFO_KERB),
         5  : ('Cert', FW_AUTH_INFO_CERT),
@@ -2268,8 +2325,13 @@ class FW_PHASE1_SA_DETAILS(NDRSTRUCT):
         ('dwP1SaFlags', DWORD),
     )
 
+class PFW_PHASE1_SA_DETAILS(NDRPOINTER):
+    referent = (
+        ('Data', FW_PHASE1_SA_DETAILS),
+    )
+
 class FW_PHASE1_SA_DETAILS_ARRAY(NDRUniConformantArray):
-    item = FW_PHASE1_SA_DETAILS
+    item = PFW_PHASE1_SA_DETAILS
 
 class PFW_PHASE1_SA_DETAILS_ARRAY(NDRPOINTER):
     referent = (
@@ -2290,17 +2352,25 @@ class FW_PHASE2_SA_DETAILS(NDRSTRUCT):
         ('dwP2SaFlags', DWORD),
     )
 
+class PFW_PHASE2_SA_DETAILS(NDRPOINTER):
+    referent = (
+        ('Data', FW_PHASE2_SA_DETAILS),
+    )
+
 class FW_PHASE2_SA_DETAILS_ARRAY(NDRUniConformantArray):
-    item = FW_PHASE2_SA_DETAILS
+    item = PFW_PHASE2_SA_DETAILS
 
 class PFW_PHASE2_SA_DETAILS_ARRAY(NDRPOINTER):
     referent = (
         ('Data', FW_PHASE2_SA_DETAILS_ARRAY),
     )
 
+class PFW_MM_RULE(_FW_LINKED_LIST_POINTER):
+    pass
+
 class FW_MM_RULE(NDRSTRUCT):
     structure = (
-        ('pNext', PVOID),
+        ('pNext', PFW_MM_RULE),
         ('wSchemaVersion', WORD),
         ('wszRuleId', LPWSTR),
         ('wszName', LPWSTR),
@@ -2320,17 +2390,13 @@ class FW_MM_RULE(NDRSTRUCT):
         ('pMetaData', PFW_OBJECT_METADATA),
     )
 
-class PFW_MM_RULE(NDRPOINTER):
-    referent = (
-        ('Data', FW_MM_RULE),
-    )
+PFW_MM_RULE.referent = (
+    ('Data', FW_MM_RULE),
+)
 
-class FW_MM_RULE_ARRAY(NDRUniConformantArray):
-    item = FW_MM_RULE
-
-class PFW_MM_RULE_ARRAY(NDRPOINTER):
+class PPFW_MM_RULE(NDRPOINTER):
     referent = (
-        ('Data', FW_MM_RULE_ARRAY),
+        ('Data', PFW_MM_RULE),
     )
 
 class FW_MATCH_VALUE(NDRUNION):
@@ -2581,13 +2647,14 @@ class FWGetGlobalConfig(NDRCALL):
         ('StoreType', FW_STORE_TYPE),
         ('configID', FW_GLOBAL_CONFIG),
         ('dwFlags', DWORD),
-        ('pBuffer', PBYTE_ARRAY),
+        ('pBuffer', PBYTE_ARRAY_CV),
         ('cbData', DWORD),
         ('pcbTransmittedLen', LPDWORD),
     )
 
 class FWGetGlobalConfigResponse(NDRCALL):
     structure = (
+        ('pBuffer', PBYTE_ARRAY_CV),
         ('pcbTransmittedLen', LPDWORD),
         ('pcbRequired', LPDWORD),
         ('ErrorCode', DWORD),
@@ -2691,7 +2758,7 @@ class FWEnumFirewallRules(NDRCALL):
 class FWEnumFirewallRulesResponse(NDRCALL):
     structure = (
         ('pdwNumRules', LPDWORD),
-        ('ppRules', PFW_RULE2_0_ARRAY),
+        ('ppRules', PPFW_RULE2_0),
         ('ErrorCode', DWORD),
     )
 
@@ -2706,13 +2773,14 @@ class FWGetConfig(NDRCALL):
         ('configID', FW_PROFILE_CONFIG),
         ('Profile', FW_PROFILE_TYPE),
         ('dwFlags', DWORD),
-        ('pBuffer', PBYTE_ARRAY),
+        ('pBuffer', PBYTE_ARRAY_CV),
         ('cbData', DWORD),
         ('pcbTransmittedLen', LPDWORD),
     )
 
 class FWGetConfigResponse(NDRCALL):
     structure = (
+        ('pBuffer', PBYTE_ARRAY_CV),
         ('pcbTransmittedLen', LPDWORD),
         ('pcbRequired', LPDWORD),
         ('ErrorCode', DWORD),
@@ -2816,7 +2884,7 @@ class FWEnumConnectionSecurityRules(NDRCALL):
 class FWEnumConnectionSecurityRulesResponse(NDRCALL):
     structure = (
         ('pdwNumRules', LPDWORD),
-        ('ppRules', PFW_CS_RULE2_0_ARRAY),
+        ('ppRules', PPFW_CS_RULE2_0),
         ('ErrorCode', DWORD),
     )
 
@@ -2901,7 +2969,7 @@ class FWEnumAuthenticationSets(NDRCALL):
 class FWEnumAuthenticationSetsResponse(NDRCALL):
     structure = (
         ('pdwNumAuthSets', LPDWORD),
-        ('ppAuth', PFW_AUTH_SET2_10_ARRAY),
+        ('ppAuth', PPFW_AUTH_SET2_10),
         ('ErrorCode', DWORD),
     )
 
@@ -2986,7 +3054,7 @@ class FWEnumCryptoSets(NDRCALL):
 class FWEnumCryptoSetsResponse(NDRCALL):
     structure = (
         ('pdwNumSets', LPDWORD),
-        ('ppCryptoSets', PFW_CRYPTO_SET_ARRAY),
+        ('ppCryptoSets', PPFW_CRYPTO_SET),
         ('ErrorCode', DWORD),
     )
 
@@ -3156,7 +3224,7 @@ class FWEnumMainModeRules(NDRCALL):
 class FWEnumMainModeRulesResponse(NDRCALL):
     structure = (
         ('pdwNumRules', LPDWORD),
-        ('ppMMRules', PFW_MM_RULE_ARRAY),
+        ('ppMMRules', PPFW_MM_RULE),
         ('ErrorCode', DWORD),
     )
 
@@ -3175,7 +3243,7 @@ class FWQueryFirewallRules(NDRCALL):
 class FWQueryFirewallRulesResponse(NDRCALL):
     structure = (
         ('pdwNumRules', LPDWORD),
-        ('ppRules', PFW_RULE2_10_ARRAY),
+        ('ppRules', PPFW_RULE2_10),
         ('ErrorCode', DWORD),
     )
 
@@ -3194,7 +3262,7 @@ class FWQueryConnectionSecurityRules2_10(NDRCALL):
 class FWQueryConnectionSecurityRules2_10Response(NDRCALL):
     structure = (
         ('pdwNumRules', LPDWORD),
-        ('ppRules', PFW_CS_RULE2_10_ARRAY),
+        ('ppRules', PPFW_CS_RULE2_10),
         ('ErrorCode', DWORD),
     )
 
@@ -3213,7 +3281,7 @@ class FWQueryMainModeRules(NDRCALL):
 class FWQueryMainModeRulesResponse(NDRCALL):
     structure = (
         ('pdwNumRules', LPDWORD),
-        ('ppMMRules', PFW_MM_RULE_ARRAY),
+        ('ppMMRules', PPFW_MM_RULE),
         ('ErrorCode', DWORD),
     )
 
@@ -3233,7 +3301,7 @@ class FWQueryAuthenticationSets(NDRCALL):
 class FWQueryAuthenticationSetsResponse(NDRCALL):
     structure = (
         ('pdwNumSets', LPDWORD),
-        ('ppAuthSets', PFW_AUTH_SET2_10_ARRAY),
+        ('ppAuthSets', PPFW_AUTH_SET2_10),
         ('ErrorCode', DWORD),
     )
 
@@ -3253,7 +3321,7 @@ class FWQueryCryptoSets(NDRCALL):
 class FWQueryCryptoSetsResponse(NDRCALL):
     structure = (
         ('pdwNumSets', LPDWORD),
-        ('ppCryptoSets', PFW_CRYPTO_SET_ARRAY),
+        ('ppCryptoSets', PPFW_CRYPTO_SET),
         ('ErrorCode', DWORD),
     )
 
@@ -3302,13 +3370,14 @@ class FWGetGlobalConfig2_10(NDRCALL):
         ('StoreType', FW_STORE_TYPE),
         ('configID', FW_GLOBAL_CONFIG),
         ('dwFlags', DWORD),
-        ('pBuffer', PBYTE_ARRAY),
+        ('pBuffer', PBYTE_ARRAY_CV),
         ('cbData', DWORD),
         ('pcbTransmittedLen', LPDWORD),
     )
 
 class FWGetGlobalConfig2_10Response(NDRCALL):
     structure = (
+        ('pBuffer', PBYTE_ARRAY_CV),
         ('pcbTransmittedLen', LPDWORD),
         ('pcbRequired', LPDWORD),
         ('pOrigin', PFW_RULE_ORIGIN_TYPE),
@@ -3326,13 +3395,14 @@ class FWGetConfig2_10(NDRCALL):
         ('configID', FW_PROFILE_CONFIG),
         ('Profile', FW_PROFILE_TYPE),
         ('dwFlags', DWORD),
-        ('pBuffer', PBYTE_ARRAY),
+        ('pBuffer', PBYTE_ARRAY_CV),
         ('cbData', DWORD),
         ('pcbTransmittedLen', LPDWORD),
     )
 
 class FWGetConfig2_10Response(NDRCALL):
     structure = (
+        ('pBuffer', PBYTE_ARRAY_CV),
         ('pcbTransmittedLen', LPDWORD),
         ('pcbRequired', LPDWORD),
         ('pOrigin', PFW_RULE_ORIGIN_TYPE),
@@ -3389,7 +3459,7 @@ class FWEnumFirewallRules2_10(NDRCALL):
 class FWEnumFirewallRules2_10Response(NDRCALL):
     structure = (
         ('pdwNumRules', LPDWORD),
-        ('ppRules', PFW_RULE2_10_ARRAY),
+        ('ppRules', PPFW_RULE2_10),
         ('ErrorCode', DWORD),
     )
 
@@ -3443,7 +3513,7 @@ class FWEnumConnectionSecurityRules2_10(NDRCALL):
 class FWEnumConnectionSecurityRules2_10Response(NDRCALL):
     structure = (
         ('pdwNumRules', LPDWORD),
-        ('ppRules', PFW_CS_RULE2_10_ARRAY),
+        ('ppRules', PPFW_CS_RULE2_10),
         ('ErrorCode', DWORD),
     )
 
@@ -3497,7 +3567,7 @@ class FWEnumAuthenticationSets2_10(NDRCALL):
 class FWEnumAuthenticationSets2_10Response(NDRCALL):
     structure = (
         ('pdwNumAuthSets', LPDWORD),
-        ('ppAuth', PFW_AUTH_SET2_10_ARRAY),
+        ('ppAuth', PPFW_AUTH_SET2_10),
         ('ErrorCode', DWORD),
     )
 
@@ -3551,7 +3621,7 @@ class FWEnumCryptoSets2_10(NDRCALL):
 class FWEnumCryptoSets2_10Response(NDRCALL):
     structure = (
         ('pdwNumSets', LPDWORD),
-        ('ppCryptoSets', PFW_CRYPTO_SET_ARRAY),
+        ('ppCryptoSets', PPFW_CRYPTO_SET),
         ('ErrorCode', DWORD),
     )
 
@@ -3605,7 +3675,7 @@ class FWEnumConnectionSecurityRules2_20(NDRCALL):
 class FWEnumConnectionSecurityRules2_20Response(NDRCALL):
     structure = (
         ('pdwNumRules', LPDWORD),
-        ('ppRules', PFW_CS_RULE_ARRAY),
+        ('ppRules', PPFW_CS_RULE),
         ('ErrorCode', DWORD),
     )
 
@@ -3624,7 +3694,7 @@ class FWQueryConnectionSecurityRules2_20(NDRCALL):
 class FWQueryConnectionSecurityRules2_20Response(NDRCALL):
     structure = (
         ('pdwNumRules', LPDWORD),
-        ('ppRules', PFW_CS_RULE_ARRAY),
+        ('ppRules', PPFW_CS_RULE),
         ('ErrorCode', DWORD),
     )
 
@@ -3678,7 +3748,7 @@ class FWEnumAuthenticationSets2_20(NDRCALL):
 class FWEnumAuthenticationSets2_20Response(NDRCALL):
     structure = (
         ('pdwNumAuthSets', LPDWORD),
-        ('ppAuth', PFW_AUTH_SET_ARRAY),
+        ('ppAuth', PPFW_AUTH_SET),
         ('ErrorCode', DWORD),
     )
 
@@ -3698,7 +3768,7 @@ class FWQueryAuthenticationSets2_20(NDRCALL):
 class FWQueryAuthenticationSets2_20Response(NDRCALL):
     structure = (
         ('pdwNumSets', LPDWORD),
-        ('ppAuthSets', PFW_AUTH_SET_ARRAY),
+        ('ppAuthSets', PPFW_AUTH_SET),
         ('ErrorCode', DWORD),
     )
 
@@ -3752,7 +3822,7 @@ class FWEnumFirewallRules2_20(NDRCALL):
 class FWEnumFirewallRules2_20Response(NDRCALL):
     structure = (
         ('pdwNumRules', LPDWORD),
-        ('ppRules', PFW_RULE2_20_ARRAY),
+        ('ppRules', PPFW_RULE2_20),
         ('ErrorCode', DWORD),
     )
 
@@ -3771,7 +3841,7 @@ class FWQueryFirewallRules2_20(NDRCALL):
 class FWQueryFirewallRules2_20Response(NDRCALL):
     structure = (
         ('pdwNumRules', LPDWORD),
-        ('ppRules', PFW_RULE2_20_ARRAY),
+        ('ppRules', PPFW_RULE2_20),
         ('ErrorCode', DWORD),
     )
 
@@ -3825,7 +3895,7 @@ class FWEnumFirewallRules2_24(NDRCALL):
 class FWEnumFirewallRules2_24Response(NDRCALL):
     structure = (
         ('pdwNumRules', LPDWORD),
-        ('ppRules', PFW_RULE2_24_ARRAY),
+        ('ppRules', PPFW_RULE2_24),
         ('ErrorCode', DWORD),
     )
 
@@ -3844,7 +3914,7 @@ class FWQueryFirewallRules2_24(NDRCALL):
 class FWQueryFirewallRules2_24Response(NDRCALL):
     structure = (
         ('pdwNumRules', LPDWORD),
-        ('ppRules', PFW_RULE2_24_ARRAY),
+        ('ppRules', PPFW_RULE2_24),
         ('ErrorCode', DWORD),
     )
 
@@ -3898,7 +3968,7 @@ class FWEnumFirewallRules2_25(NDRCALL):
 class FWEnumFirewallRules2_25Response(NDRCALL):
     structure = (
         ('pdwNumRules', LPDWORD),
-        ('ppRules', PFW_RULE2_25_ARRAY),
+        ('ppRules', PPFW_RULE2_25),
         ('ErrorCode', DWORD),
     )
 
@@ -3917,7 +3987,7 @@ class FWQueryFirewallRules2_25(NDRCALL):
 class FWQueryFirewallRules2_25Response(NDRCALL):
     structure = (
         ('pdwNumRules', LPDWORD),
-        ('ppRules', PFW_RULE2_25_ARRAY),
+        ('ppRules', PPFW_RULE2_25),
         ('ErrorCode', DWORD),
     )
 
@@ -3971,7 +4041,7 @@ class FWEnumFirewallRules2_26(NDRCALL):
 class FWEnumFirewallRules2_26Response(NDRCALL):
     structure = (
         ('pdwNumRules', LPDWORD),
-        ('ppRules', PFW_RULE2_26_ARRAY),
+        ('ppRules', PPFW_RULE2_26),
         ('ErrorCode', DWORD),
     )
 
@@ -3990,7 +4060,7 @@ class FWQueryFirewallRules2_26(NDRCALL):
 class FWQueryFirewallRules2_26Response(NDRCALL):
     structure = (
         ('pdwNumRules', LPDWORD),
-        ('ppRules', PFW_RULE2_26_ARRAY),
+        ('ppRules', PPFW_RULE2_26),
         ('ErrorCode', DWORD),
     )
 
@@ -4044,7 +4114,7 @@ class FWEnumFirewallRules2_27(NDRCALL):
 class FWEnumFirewallRules2_27Response(NDRCALL):
     structure = (
         ('pdwNumRules', LPDWORD),
-        ('ppRules', PFW_RULE2_27_ARRAY),
+        ('ppRules', PPFW_RULE2_27),
         ('ErrorCode', DWORD),
     )
 
@@ -4063,7 +4133,7 @@ class FWQueryFirewallRules2_27(NDRCALL):
 class FWQueryFirewallRules2_27Response(NDRCALL):
     structure = (
         ('pdwNumRules', LPDWORD),
-        ('ppRules', PFW_RULE2_27_ARRAY),
+        ('ppRules', PPFW_RULE2_27),
         ('ErrorCode', DWORD),
     )
 
@@ -4117,7 +4187,7 @@ class FWEnumFirewallRules2_31(NDRCALL):
 class FWEnumFirewallRules2_31Response(NDRCALL):
     structure = (
         ('pdwNumRules', LPDWORD),
-        ('ppRules', PFW_RULE2_31_ARRAY),
+        ('ppRules', PPFW_RULE2_31),
         ('ErrorCode', DWORD),
     )
 
@@ -4136,16 +4206,16 @@ class FWQueryFirewallRules2_31(NDRCALL):
 class FWQueryFirewallRules2_31Response(NDRCALL):
     structure = (
         ('pdwNumRules', LPDWORD),
-        ('ppRules', PFW_RULE2_31_ARRAY),
+        ('ppRules', PPFW_RULE2_31),
         ('ErrorCode', DWORD),
     )
 
 RRPC_FWQueryFirewallRules2_31 = FWQueryFirewallRules2_31
 RRPC_FWQueryFirewallRules2_31Response = FWQueryFirewallRules2_31Response
 
-# RRPC_FWAddFirewallRule2_33 (Opnum 90)
+# RRPC_FWAddFirewallRule2_33 (Opnum 91)
 class FWAddFirewallRule2_33(NDRCALL):
-    opnum = 90
+    opnum = 91
     structure = (
         ('hPolicyStore', FW_POLICY_STORE_HANDLE),
         ('pRule', PFW_RULE),
@@ -4160,9 +4230,9 @@ class FWAddFirewallRule2_33Response(NDRCALL):
 RRPC_FWAddFirewallRule2_33 = FWAddFirewallRule2_33
 RRPC_FWAddFirewallRule2_33Response = FWAddFirewallRule2_33Response
 
-# RRPC_FWSetFirewallRule2_33 (Opnum 91)
+# RRPC_FWSetFirewallRule2_33 (Opnum 92)
 class FWSetFirewallRule2_33(NDRCALL):
-    opnum = 91
+    opnum = 92
     structure = (
         ('hPolicyStore', FW_POLICY_STORE_HANDLE),
         ('pRule', PFW_RULE),
@@ -4177,9 +4247,9 @@ class FWSetFirewallRule2_33Response(NDRCALL):
 RRPC_FWSetFirewallRule2_33 = FWSetFirewallRule2_33
 RRPC_FWSetFirewallRule2_33Response = FWSetFirewallRule2_33Response
 
-# RRPC_FWEnumFirewallRules2_33 (Opnum 92)
+# RRPC_FWEnumFirewallRules2_33 (Opnum 93)
 class FWEnumFirewallRules2_33(NDRCALL):
-    opnum = 92
+    opnum = 93
     structure = (
         ('hPolicyStore', FW_POLICY_STORE_HANDLE),
         ('dwFilteredByStatus', DWORD),
@@ -4190,16 +4260,16 @@ class FWEnumFirewallRules2_33(NDRCALL):
 class FWEnumFirewallRules2_33Response(NDRCALL):
     structure = (
         ('pdwNumRules', LPDWORD),
-        ('ppRules', PFW_RULE_ARRAY),
+        ('ppRules', PPFW_RULE),
         ('ErrorCode', DWORD),
     )
 
 RRPC_FWEnumFirewallRules2_33 = FWEnumFirewallRules2_33
 RRPC_FWEnumFirewallRules2_33Response = FWEnumFirewallRules2_33Response
 
-# RRPC_FWQueryFirewallRules2_33 (Opnum 93)
+# RRPC_FWQueryFirewallRules2_33 (Opnum 94)
 class FWQueryFirewallRules2_33(NDRCALL):
-    opnum = 93
+    opnum = 94
     structure = (
         ('hPolicyStore', FW_POLICY_STORE_HANDLE),
         ('pQuery', PFW_QUERY),
@@ -4209,7 +4279,7 @@ class FWQueryFirewallRules2_33(NDRCALL):
 class FWQueryFirewallRules2_33Response(NDRCALL):
     structure = (
         ('pdwNumRules', LPDWORD),
-        ('ppRules', PFW_RULE_ARRAY),
+        ('ppRules', PPFW_RULE),
         ('ErrorCode', DWORD),
     )
 
@@ -4311,10 +4381,10 @@ OPNUMS = {
     87: (FWSetFirewallRule2_31, FWSetFirewallRule2_31Response),
     88: (FWEnumFirewallRules2_31, FWEnumFirewallRules2_31Response),
     89: (FWQueryFirewallRules2_31, FWQueryFirewallRules2_31Response),
-    90: (FWAddFirewallRule2_33, FWAddFirewallRule2_33Response),
-    91: (FWSetFirewallRule2_33, FWSetFirewallRule2_33Response),
-    92: (FWEnumFirewallRules2_33, FWEnumFirewallRules2_33Response),
-    93: (FWQueryFirewallRules2_33, FWQueryFirewallRules2_33Response),
+    91: (FWAddFirewallRule2_33, FWAddFirewallRule2_33Response),
+    92: (FWSetFirewallRule2_33, FWSetFirewallRule2_33Response),
+    93: (FWEnumFirewallRules2_33, FWEnumFirewallRules2_33Response),
+    94: (FWQueryFirewallRules2_33, FWQueryFirewallRules2_33Response),
 }
 
 ################################################################################
