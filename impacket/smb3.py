@@ -879,7 +879,7 @@ class SMB3:
                 apSessionKey = Key(apCipher.enctype, encAPRepPart['subkey']['keyvalue'].asOctets())
 
                 sequenceNumber = int(encAPRepPart['seq-number'])
-                self._Session['SessionKey'] = apSessionKey.contents
+                self._Session['SessionKey'] = apSessionKey.contents[:16]
 
             else:
                 self._Session['SessionKey']  = sessionKey.contents[:16]
