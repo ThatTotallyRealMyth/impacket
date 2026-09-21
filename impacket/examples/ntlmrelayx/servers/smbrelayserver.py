@@ -259,7 +259,7 @@ class SMBRelayServer(Thread):
            mechTypes = blob['MechTypes'] if 'MechTypes' in blob.fields else []
            negoexOffered = TypesMech['NEGOEX - SPNEGO Extended Negotiation Security Mechanism'] in mechTypes
            if negoexOffered:
-               smbServer.log("NEGOEX/PKU2U authentication offered by client, currently not supported for relay", logging.INFO)
+               LOG.info("(SMB): NEGOEX authentication offered by client %s, currently not supported for relay" % connData['ClientIP'])
 
            mechType = mechTypes[0] if mechTypes else None
            ntlmMech = TypesMech['NTLMSSP - Microsoft NTLM Security Support Provider']
@@ -284,6 +284,12 @@ class SMBRelayServer(Thread):
         elif struct.unpack('B',securityBlob[0:1])[0] == ASN1_SUPPORTED_MECH:
            # AUTH packet
            blob = SPNEGO_NegTokenResp(securityBlob)
+           if blob.isNegoExSelected():
+               LOG.info("(SMB): NEGOEX selected by client %s, currently not supported for relay" % connData['ClientIP'])
+               respSMBCommand['SecurityBufferOffset'] = 0x48
+               respSMBCommand['SecurityBufferLength'] = 0
+               respSMBCommand['Buffer'] = b''
+               return [respSMBCommand], None, STATUS_ACCESS_DENIED
            token = blob['ResponseToken']
         else:
            # No GSSAPI stuff, raw NTLMSSP
@@ -586,11 +592,43 @@ class SMBRelayServer(Thread):
             if struct.unpack('B',sessionSetupData['SecurityBlob'][0:1])[0] != ASN1_AID:
                # If there no GSSAPI ID, it must be an AUTH packet
                blob = SPNEGO_NegTokenResp(sessionSetupData['SecurityBlob'])
+               if blob.isNegoExSelected():
+                   LOG.info("(SMB): NEGOEX selected by client %s, currently not supported for relay" % connData['ClientIP'])
+                   return [respSMBCommand], None, STATUS_ACCESS_DENIED
                token = blob['ResponseToken']
             else:
                # NEGOTIATE packet
                blob =  SPNEGO_NegTokenInit(sessionSetupData['SecurityBlob'])
-               token = blob['MechToken']
+               mechTypes = blob['MechTypes'] if 'MechTypes' in blob.fields else []
+               negoexOffered = TypesMech['NEGOEX - SPNEGO Extended Negotiation Security Mechanism'] in mechTypes
+               if negoexOffered:
+                   LOG.info("(SMB): NEGOEX authentication offered by client %s, currently not supported for relay" % connData['ClientIP'])
+
+               mechType = mechTypes[0] if mechTypes else None
+               ntlmMech = TypesMech['NTLMSSP - Microsoft NTLM Security Support Provider']
+               if mechType != ntlmMech:
+                   if mechType in MechTypes:
+                       mechStr = MechTypes[mechType]
+                   elif mechType is not None:
+                       mechStr = hexlify(mechType)
+                   else:
+                       mechStr = 'none'
+                   LOG.debug("(SMB): Unsupported MechType '%s'" % mechStr)
+
+                   respToken = SPNEGO_NegTokenResp()
+                   respToken['NegState'] = b'\x03'  # request-mic
+                   respToken['SupportedMech'] = ntlmMech
+                   respToken = respToken.getData()
+                   respParameters['SecurityBlobLength'] = len(respToken)
+                   respData['SecurityBlobLength'] = respParameters['SecurityBlobLength']
+                   respData['SecurityBlob'] = respToken
+                   respData['NativeOS'] = ''
+                   respData['NativeLanMan'] = ''
+                   respSMBCommand['Parameters'] = respParameters
+                   respSMBCommand['Data'] = respData
+                   return [respSMBCommand], None, STATUS_MORE_PROCESSING_REQUIRED
+
+               token = blob['MechToken'] if 'MechToken' in blob.fields else b''
 
             # Here we only handle NTLMSSP, depending on what stage of the
             # authentication we are, we act on it

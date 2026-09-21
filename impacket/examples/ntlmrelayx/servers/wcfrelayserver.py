@@ -150,13 +150,14 @@ class WCFRelayServer(Thread):
                 if struct.unpack('B', securityBlob[0:1])[0] == ASN1_AID:
                     # SPNEGO NEGOTIATE packet
                     blob = SPNEGO_NegTokenInit(securityBlob)
-                    token = blob['MechToken']
-                    if len(blob['MechTypes'][0]) > 0:
+                    token = blob['MechToken'] if 'MechToken' in blob.fields else b''
+                    mechTypes = blob['MechTypes'] if 'MechTypes' in blob.fields else []
+                    if blob.isNegoExOffered():
+                        LOG.info("(WCF): NEGOEX authentication offered by client, which is not currently supported for relay")
+                    if mechTypes:
                         # Is this GSSAPI NTLM or something else we don't support?
-                        mechType = blob['MechTypes'][0]
+                        mechType = mechTypes[0]
                         if mechType != TypesMech['NTLMSSP - Microsoft NTLM Security Support Provider']:
-                            if blob.isNegoExOffered():
-                                LOG.info("(WCF): NEGOEX/PKU2U authentication offered by client, which is not currently supported for relay, requesting NTLM")
                             # Nope, do we know it?
                             if mechType in MechTypes:
                                 mechStr = MechTypes[mechType]
@@ -234,7 +235,7 @@ class WCFRelayServer(Thread):
                 # remove SPNEGO wrapping
                 blob = SPNEGO_NegTokenResp(ntlmssp_auth)
                 if blob.isNegoExSelected():
-                    LOG.info("(WCF): NEGOEX/PKU2U selected in auth response, which is not currently supported for relay")
+                    LOG.info("(WCF): NEGOEX selected in auth response, which is not currently supported for relay")
                     return
                 ntlmssp_auth = blob['ResponseToken']
 
