@@ -113,7 +113,6 @@ class MSSQLRelayServer(Thread):
             self.target = None
             self.client = None
             self.authUser = None
-            self.client_address = None
             self.tds8_mode = False
             self.client_uses_spnego = False
             
@@ -124,8 +123,6 @@ class MSSQLRelayServer(Thread):
                 
             LOG.info("(MSSQL): Received connection from %s, attacking target %s://%s" % (client_address[0] ,self.target.scheme, self.target.netloc))
 
-            self.client_address = client_address[0]            
-            
             if ':' in self.target.netloc:
                 target_string,port=self.target.netloc.split(':')
                 self.target_port=int(port)
@@ -314,7 +311,7 @@ class MSSQLRelayServer(Thread):
 
                 self.tds8_mode = False
                 if first_byte[0] == 0x16:  # TLS handshake record
-                    LOG.debug("(MSSQL): Detected TDS 8.0 (TLS) connection from %s" % self.client_address)
+                    LOG.debug("(MSSQL): Detected TDS 8.0 (TLS) connection from %s", self.client_address[0])
                     self.tds8_mode = True
                     try:
                         self.request = self.server.ssl_context.wrap_socket(
